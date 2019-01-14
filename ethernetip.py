@@ -60,6 +60,8 @@ CIP_OBJ_MESSAGE_ROUTER = 0x02
 CIP_OBJ_ASSEMBLY       = 0x04
 CIP_OBJ_CONNECTION     = 0x05
 CIP_OBJ_CONNMANAGER    = 0x06
+CIP_OBJ_PARAMETER      = 0x0f
+CIP_OBJ_PARAMETER_GROUP= 0x10
 CIP_OBJ_DLR            = 0x47
 CIP_OBJ_QOS            = 0x48
 CIP_OBJ_BASE_SWITCH    = 0x51
@@ -119,6 +121,7 @@ CIP_ROUTER_ERROR_UNKNOWN_MODBUS_ERROR      = 0x2B  # Unhandled Modbus Error
 CIP_ROUTER_ERROR_STILL_PROCESSING          = 0xFF  # Special marker to indicate we haven't finished processing the request yet
 
 # Extended status in Forward open response
+CIP_FWD_OPEN_EXTENDED_STATUS_VENDOR_OR_PRODUCT_CODE_MISMATCH = 0x114
 CIP_FWD_OPEN_EXTENDED_STATUS_INVALID_CONFIGURATION_SIZE = 0x126
 
 class EncapsulationPacket(dpkt.Packet):
@@ -197,6 +200,24 @@ class ForwardOpenReq(dpkt.Packet):
     FORWARD_OPEN_CONN_PARAM_BIT_PRIORITY    = 10
     FORWARD_OPEN_CONN_PARAM_BIT_CONN_TYPE   = 13
     FORWARD_OPEN_CONN_PARAM_BIT_REDAN_OWN   = 15
+
+    FORWARD_OPEN_CONN_PRIO_LOW              = 0
+    FORWARD_OPEN_CONN_PRIO_HIGH             = 1
+    FORWARD_OPEN_CONN_PRIO_SCHEDULED        = 2
+    FORWARD_OPEN_CONN_PRIO_URGENT           = 3
+
+    FORWARD_OPEN_TRANSPORT_DIRECTION_BIT    = 7
+    FORWARD_OPEN_TRANSPORT_TRIGGER_BIT      = 4
+    FORWARD_OPEN_TRANSPORT_CLASS_BIT        = 0
+    FORWARD_OPEN_TRANSPORT_DIRECTION_CLIENT         = 0
+    FORWARD_OPEN_TRANSPORT_DIRECTION_SERVER         = 1
+    FORWARD_OPEN_TRANSPORT_TRIGGER_CYCLIC           = 0
+    FORWARD_OPEN_TRANSPORT_TRIGGER_CHANGE_OF_STATE  = 1
+    FORWARD_OPEN_TRANSPORT_TRIGGER_APPLICATION      = 2
+    FORWARD_OPEN_TRANSPORT_CLASS_0                  = 0
+    FORWARD_OPEN_TRANSPORT_CLASS_1                  = 1
+    FORWARD_OPEN_TRANSPORT_CLASS_2                  = 2
+    FORWARD_OPEN_TRANSPORT_CLASS_3                  = 3
 
     __byte_order__ = '<'
     __hdr__ = (('mkpath', '5s', b"00000"), # len, 2 path
@@ -684,7 +705,11 @@ class EtherNetIPExpConnection(EtherNetIPSession):
 
     def sendFwdOpenReq(self, inputinst, outputinst, configinst, multiplier=1, \
                        torpi=1000, otrpi=1000, multicast=False, inputsz=None, \
-                       outputsz=None, fwdo=None, configData=None):
+                       outputsz=None, fwdo=None, configData=None, \
+                       keyring_vendor=0, keyring_devicetype=0, keyring_productcode=0, keyring_major=0, keyring_minor=0, keyring_compat=False, \
+                       path_class=0x04, fixed_connection_size=True, priority=ForwardOpenReq.FORWARD_OPEN_CONN_PRIO_SCHEDULED, \
+                       direction=ForwardOpenReq.FORWARD_OPEN_TRANSPORT_DIRECTION_CLIENT, trigger=ForwardOpenReq.FORWARD_OPEN_TRANSPORT_TRIGGER_CYCLIC, \
+                       transport_class=ForwardOpenReq.FORWARD_OPEN_TRANSPORT_CLASS_1):
         rand = random.randint(1, 0xffff) + 0xE4190000
         torpi *= 1000
         otrpi *= 1000
@@ -704,10 +729,26 @@ class EtherNetIPExpConnection(EtherNetIPSession):
             mcast = 2 # p2p
         else:
             mcast = 1
-        path = struct.pack(">I",0x34040000) + struct.pack("I",0) + \
-               struct.pack(">I",0x00002004) + struct.pack("B",0x24) + struct.pack("B",configinst) + \
-               struct.pack("B",0x2c) + struct.pack("B",outputinst) + struct.pack("B",0x2c) +        \
-               struct.pack("B",inputinst)
+        if fixed_connection_size == True:
+            fixed = 0
+        else:
+            fixed = 1 # variable connection size
+
+        type_trigger = (transport_class | direction << ForwardOpenReq.FORWARD_OPEN_TRANSPORT_DIRECTION_BIT | trigger << ForwardOpenReq.FORWARD_OPEN_TRANSPORT_TRIGGER_BIT)
+
+        keyring_maj = keyring_major & 0x7F
+        if keyring_compat:
+            keyring_maj += 128 # set compatibility flag
+        path = struct.pack(">H",0x3404) + struct.pack("H", keyring_vendor) + struct.pack("HH", keyring_devicetype, keyring_productcode) + \
+               struct.pack(">BB", keyring_maj, keyring_minor)
+        if path_class != None:
+            path += struct.pack(">BB", 0x20, path_class)
+        if configinst != None:
+            path += struct.pack("B",0x24) + struct.pack("B",configinst)
+        if outputinst != None:
+            path += struct.pack("B",0x2c) + struct.pack("B",outputinst) 
+        if inputinst != None:
+            path += struct.pack("B",0x2c) + struct.pack("B",inputinst)
         plen = int(len(path) / 2)
         if configData != None:
                 # 0x80 = simple data segment, with length in words => max 512 bytes of data
@@ -726,13 +767,16 @@ class EtherNetIPExpConnection(EtherNetIPSession):
                                   torpi=torpi, \
                                   otrpi=otrpi, \
                                   toparams=(int(inputsz)| \
-                                            (0x2<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_PRIORITY) | \
+                                            (priority<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_PRIORITY) | \
+                                            fixed<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_FIXED_VAR | \
                                             (mcast<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_CONN_TYPE) \
                                            ), \
                                   otparams=(int(outputsz) | \
-                                            0x2<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_PRIORITY | \
+                                            priority<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_PRIORITY | \
+                                            fixed<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_FIXED_VAR | \
                                             0x2<<ForwardOpenReq.FORWARD_OPEN_CONN_PARAM_BIT_CONN_TYPE \
                                            ), \
+                                  type_trigger=type_trigger, \
                                   plen=plen, \
                                   data=path \
                                  )
@@ -763,12 +807,13 @@ class EtherNetIPExpConnection(EtherNetIPSession):
                 udi = UnconnectedDataItem(csd.data)
                 if udi.data[1] == 0: # Forward Open Status
                     fworsp = ForwardOpenResp(udi.data)
-                    # socket address info O->T
-                    ucdih = UnconnectedDataItemHdr(fworsp.data)
-                    otaddrinfo = SocketAddressInfo(ucdih.data)
-                    if b'' != otaddrinfo.data:
-                        ucdih2 = UnconnectedDataItemHdr(otaddrinfo.data)
-                        toaddrinfo = SocketAddressInfo(ucdih2.data)
+                    if csd.item_count > 2:
+                        # socket address info O->T
+                        ucdih = UnconnectedDataItemHdr(fworsp.data)
+                        otaddrinfo = SocketAddressInfo(ucdih.data)
+                        if b'' != otaddrinfo.data:
+                            ucdih2 = UnconnectedDataItemHdr(otaddrinfo.data)
+                            toaddrinfo = SocketAddressInfo(ucdih2.data)
                     self.otconnid = fworsp.otconnid
                     self.toconnid = fworsp.toconnid
                     self.otapi = fworsp.otapi / 1000
@@ -784,13 +829,20 @@ class EtherNetIPExpConnection(EtherNetIPSession):
                         return extended_status
         return None
 
-    def sendFwdCloseReq(self, inputinst, outputinst, configinst):
-        path = struct.pack(">HB",0x2004, 0x24) + struct.pack("B",configinst) + \
-               struct.pack("B",0x2c) + struct.pack("B",outputinst) + struct.pack("B",0x2c) + \
-               struct.pack("B",inputinst)
-        fwdc = ForwardCloseReq(conn_serial=self.conn_serial_num, \
+    def sendFwdCloseReq(self, inputinst, outputinst, configinst, path_class=0x04, connection_serialno=None):
+        path = struct.pack(">BBB",0x20, path_class, 0x24) + struct.pack("B",configinst)
+        if outputinst != None:
+               path += struct.pack("B",0x2c) + struct.pack("B",outputinst)
+        if inputinst != None:
+                path += struct.pack("B",0x2c) + struct.pack("B",inputinst)
+        plen = int(len(path) / 2)
+        if connection_serialno == None:
+            conn_serial_num = self.conn_serial_num
+        else:
+            conn_serial_num = connection_serialno
+        fwdc = ForwardCloseReq(conn_serial=conn_serial_num, \
                                mkpath=self.mkReqPath(clas=0x06,inst=0x01,attr=None), \
-                               plen=4, \
+                               plen=plen, \
                                data=path \
                               )
         # add service field
@@ -870,7 +922,7 @@ def testENIP():
     EIP = EtherNetIP(hostname)
     C1 = EIP.explicit_conn(hostname)
 
-    """    
+    
     listOfNodes = C1.scanNetwork(broadcast,5)
     print("Found ", len(listOfNodes), " nodes")
     for node in listOfNodes:
@@ -878,8 +930,7 @@ def testENIP():
         sockinfo = SocketAddressInfo(node.socket_addr)
         ip = socket.inet_ntoa(struct.pack("!I",sockinfo.sin_addr))
         print(ip, " - ", name)
-    """
-
+    
     pkt = C1.listID()
     if pkt != None:
         print("Product name: ", pkt.product_name.decode())
@@ -887,34 +938,18 @@ def testENIP():
     pkt = C1.listServices()
     print("ListServices:", str(pkt))
 
-
-    path = C1.mkReqPath(0x300, 1, None)
-    data = struct.pack("HB", 0x12, 0)
-    r = C1.unconnSend(0x32, path+data, random.randint(1,4026531839))
-    #r = C1.getAttrSingle(0x300, 1, None, struct.pack("HB", 0x12, 0))
-    if 0 == r[0]:
-        print("Could read 0x300")
-    else:
-        print("Failed to read 0x300")
-
-    """
     # read input size from global system object (obj 0x84, attr 4)
     r = C1.getAttrSingle(0x84, 1, 4)
     if 0 == r[0]:
         print("Read CPX input size from terminal success (data: "+ str(r[1]) + ")")
         inputsize = struct.unpack("B", r[1])[0]
-    else:
-        print("Failed to read CPX input size")
 
     # read output size from global system object (obj 0x84, attr 5)
     r = C1.getAttrSingle(0x84, 1, 5)
     if 0 == r[0]:
         print("Read CPX output size from terminal sucess (data: " + str(r[1]) + ")")
         outputsize = struct.unpack("B", r[1])[0]
-    else:
-        print("Failed to read CPX output size")
-    """
-    """
+
     # configure i/o
     print("Configure with {0} bytes input and {1} bytes output".format(inputsize, outputsize))
     EIP.registerAssembly(EtherNetIP.ENIP_IO_TYPE_INPUT,  inputsize, 101, C1)
@@ -945,6 +980,5 @@ def testENIP():
     C1.stopProduce()
     C1.sendFwdCloseReq(101,100,1)
     EIP.stopIO()
-    """
 
 #testENIP()
